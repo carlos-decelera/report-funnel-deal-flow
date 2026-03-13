@@ -153,11 +153,10 @@ def calcular_metricas_funnel(sub_df, col_status, col_reason):
     return [outreach, responded, init_scr, len(sub_df[first_int_mask]), len(sub_df[deep_dive_mask]), len(sub_df[pre_comm_mask])]
 
 def style_dataframe(df):
-    """Aplica color gris a las filas de TOTAL de forma dinámica."""
+    """Aplica estilo dinámico detectando el ancho real del DataFrame."""
     def apply_row_style(row):
-        # Comprobamos si la palabra TOTAL está en la primera columna (Source)
-        if "TOTAL" in str(row["Source"]):
-            # Creamos una lista de estilos con la misma longitud que la fila
+        # Si la fila es la de separación o la de TOTAL
+        if "TOTAL" in str(row.iloc[0]) or "---" in str(row.iloc[0]):
             return ['background-color: #f0f2f6; font-weight: bold; color: #31333F'] * len(row)
         return [''] * len(row)
     
