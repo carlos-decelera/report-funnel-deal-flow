@@ -170,6 +170,8 @@ if st.sidebar.button("🔄 Refrescar datos de Attio"):
     st.cache_data.clear()
     st.rerun()
 
+# ... (Mantén todas las funciones de extracción y caché anteriores igual)
+
 try:
     with st.spinner("Cargando datos desde Attio..."):
         df_master = load_and_clean_data()
@@ -177,46 +179,63 @@ try:
     if df_master.empty:
         st.warning("No se encontraron datos.")
     else:
-        # Parámetros fijos
+        # 1. PARÁMETROS Y GRUPOS
         col_ref = 'reference_3'
         col_status = 'status'
         col_reason = 'reason'
-        orden_status = ["Contacted", "Initial screening", "First interaction", "Deep dive", "Pre-committee", "Not qualified", "Killed"]
-        grupos_referencias = {
-            "INVESTMENT": ['Referral', 'Contacted by LinkedIn', 'Event'],
-            "MARKETING": ['Mail from Decelera Team', 'Decelera Newsletter', 'Social media (LinkedIn, X, Instagram...)', 'Google', 'Press']
-        }
+        
+        # Unificamos todas las fuentes en una sola lista para la tabla
+        fuentes_investment = ['Referral', 'Contacted by LinkedIn', 'Event']
+        fuentes_marketing = ['Mail from Decelera Team', 'Decelera Newsletter', 'Social media (LinkedIn, X, Instagram...)', 'Google', 'Press', 'Other']
+        todas_las_fuentes = fuentes_investment + fuentes_marketing
 
-        # Sidebar: Selección de Batch
+        # 2. SIDEBAR
         batch_list = sorted(df_master['Batch'].unique())
         selected_batch = st.sidebar.selectbox("Selecciona un Batch/Semana", batch_list)
 
-        # Filtrado para la vista actual
+        # 3. FILTRADO
         grupo = df_master[df_master['Batch'] == selected_batch]
-        st.subheader(f"📍 {selected_batch}")
+        st.subheader(f"📍 Funnel: {selected_batch}")
 
-        def generar_tabla_bloque(fuentes):
+        # 4. FUNCIÓN PARA TABLA ÚNICA
+        def generar_tabla_unificada(fuentes):
             filas = []
             columnas = ["Source", "Outreach", "Responded", "Init. Scr.", "First Int.", "Deep Dive", "Pre-comm"]
+            
+            # Formateador de porcentajes
+            def format_pct(v, p): return f"{v} ({(v/p*100):.0f}%)" if p > 0 else f"{v} (0%)"
+
+            # Filas por cada fuente
             for ref in fuentes:
                 subset = grupo[grupo[col_ref] == ref]
                 c = calcular_metricas_funnel(subset, col_status, col_reason)
-                def format_pct(v, p): return f"{v} ({(v/p*100):.0f}%)" if p > 0 else f"{v} (0%)"
                 counts = [str(c[0])] + [format_pct(c[i], c[i-1]) for i in range(1, len(c))]
                 filas.append([ref] + counts)
             
-            # Fila de Total
-            subset_bloque = grupo[grupo[col_ref].isin(fuentes)]
-            c_s = calcular_metricas_funnel(subset_bloque, col_status, col_reason)
-            fila_subtotal = ["TOTAL GRUPO"] + [str(c_s[0])] + [f"{c_s[i]} ({(c_s[i]/c_s[i-1]*100 if c_s[i-1]>0 else 0):.0f}%)" for i in range(1, len(c_s))]
-            filas.append(fila_subtotal)
-            return pd.DataFrame(filas, columns=columnas)
+            # --- FILA DE TOTAL GLOBAL ---
+            c_s = calcular_metricas_funnel(grupo, col_status, col_reason)
+            fila_total = ["TOTAL BATCH"] + [str(c_s[0])] + [format_pct(c_s[i], c_s[i-1]) for i in range(1, len(c_s))]
+            filas.append(fila_total)
+            
+            return pd.DataFrame(filas, columnas)
 
-        st.markdown("### 💰 Investment Sources")
-        st.dataframe(style_dataframe(generar_tabla_bloque(grupos_referencias["INVESTMENT"])), use_container_width=True)
+        # 5. MOSTRAR TABLA
+        df_final = generar_tabla_unificada(todas_las_fuentes)
+        
+        # Usamos st.dataframe con el estilo de filas grises para el TOTAL
+        st.dataframe(
+            style_dataframe(df_final), 
+            use_container_width=True,
+            height=500 # Ajusta la altura si tienes muchas fuentes
+        )
 
-        st.markdown("### 📢 Marketing Sources")
-        st.dataframe(style_dataframe(generar_tabla_bloque(grupos_referencias["MARKETING"])), use_container_width=True)
+        # 6. MÉTRICAS RESUMEN (OPCIONAL: Tarjetas visuales arriba)
+        c_res = calcular_metricas_funnel(grupo, col_status, col_reason)
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Outreach", c_res[0])
+        m2.metric("Responded", c_res[1], f"{(c_res[1]/c_res[0]*100 if c_res[0]>0 else 0):.1f}%")
+        m3.metric("Deep Dive", c_res[4])
+        m4.metric("Pre-committee", c_res[5])
 
 except Exception as e:
     st.error(f"Error crítico: {e}")
