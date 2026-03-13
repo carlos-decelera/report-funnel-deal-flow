@@ -139,7 +139,11 @@ def load_and_clean_data():
 
 # --- HELPERS DE INTERFAZ ---
 
-def calcular_metricas_funnel(sub_df, col_status, col_reason):
+def calcular_metricas_funnel(sub_df):
+    # Definimos las columnas aquí dentro para no tener que pasarlas como argumentos
+    col_status = 'status'
+    col_reason = 'reason'
+    
     outreach = len(sub_df)
     responded_df = sub_df[sub_df[col_status] != "Contacted"]
     responded = len(responded_df)
