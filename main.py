@@ -50,7 +50,6 @@ def extract_value(attr_list):
     return extracted[0] if len(extracted) == 1 else extracted or None
 
 async def fetch_data(client, url, payload=None):
-    """Maneja la paginación de la API de Attio."""
     all_data = []
     limit, offset = 100, 0
     while True:
