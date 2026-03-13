@@ -128,8 +128,8 @@ grupos_referencias = {
 }
 
 # --- 3. PROCESAMIENTO DE DATOS ---
-@st.cache_data
-def load_and_clean_data(ttl=300):
+@st.cache_data(ttl=300)
+def load_and_clean_data():
     # Usamos la función que ya tienes definida en tu entorno
     df_clean = get_combined_dataframe() 
     df_clean[col_fecha] = pd.to_datetime(df_clean[col_fecha]).dt.date
