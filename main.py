@@ -130,7 +130,7 @@ grupos_referencias = {
 
 # --- 3. PROCESAMIENTO DE DATOS ---
 @st.cache_data
-def load_and_clean_data():
+def load_and_clean_data(ttl=300):
     # Usamos la función que ya tienes definida en tu entorno
     df_clean = get_combined_dataframe() 
     df_clean[col_fecha] = pd.to_datetime(df_clean[col_fecha]).dt.date
@@ -184,6 +184,10 @@ def style_dataframe(df):
     return df.style.apply(apply_row_style, axis=1)
 
 # --- 5. EJECUCIÓN PRINCIPAL ---
+if st.sidebar.button("🔄 Refrescar datos ahora"):
+    st.cache_data.clear()
+    st.rerun()
+
 try:
     df = load_and_clean_data()
     df[['Batch', 'Prioridad']] = df.apply(lambda x: pd.Series(asignar_batch_y_prioridad(x)), axis=1)
