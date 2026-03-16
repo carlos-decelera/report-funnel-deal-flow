@@ -112,7 +112,6 @@ def asignar_batch_y_prioridad(fila, col_fecha, col_stage):
 
 @st.cache_data(ttl=300)
 def load_and_clean_data():
-    """Obtiene datos de la API y los procesa COMPLETAMENTE."""
     df_clean = get_combined_dataframe_raw()
     
     if df_clean.empty:
@@ -121,21 +120,31 @@ def load_and_clean_data():
     col_fecha = 'created_at_y'
     col_stage = 'stage'
     
-    # 1. Limpieza y Formateo
+    # 1. Limpieza
     df_clean[col_fecha] = pd.to_datetime(df_clean[col_fecha]).dt.date
     df_clean['reference_3'] = df_clean['reference_3'].fillna("Other")
     df_clean['reason'] = df_clean['reason'].fillna("")
     
-    # 2. Clasificación (Se hace dentro del caché para que sea instantáneo luego)
+    # 2. Clasificación original
     df_clean[['Batch', 'Prioridad']] = df_clean.apply(
         lambda x: pd.Series(asignar_batch_y_prioridad(x, col_fecha, col_stage)), axis=1
     )
     
-    # 3. Filtrado y Orden
+    # 3. Filtrar "Otros" antes de crear el Total
     df_clean = df_clean[df_clean['Batch'] != "Otros"]
-    df_clean = df_clean.sort_values(by=['Prioridad', col_fecha])
+
+    # --- NUEVA LÓGICA: Crear el registro "TOTAL" ---
+    df_total = df_clean.copy()
+    df_total['Batch'] = "🌍 TOTAL ACUMULADO"
+    df_total['Prioridad'] = -1  # Para que salga el primero al ordenar
     
-    return df_clean
+    # Combinamos ambos
+    df_final = pd.concat([df_total, df_clean], ignore_index=True)
+    
+    # 4. Ordenar por Prioridad
+    df_final = df_final.sort_values(by=['Prioridad', col_fecha])
+    
+    return df_final
 
 # --- HELPERS DE INTERFAZ ---
 
@@ -145,16 +154,15 @@ def calcular_metricas_funnel(sub_df):
     col_reason = 'reason'
     
     outreach = len(sub_df)
-    responded_df = sub_df[sub_df[col_status] != "Contacted"]
+    responded_df = sub_df[(sub_df[col_status] != "Contacted") | (sub_df[col_reason] == "Did not answer")]
     responded = len(responded_df)
-    init_scr_df = responded_df[responded_df[col_status] != "Not qualified"]
-    init_scr = len(init_scr_df)
     
-    pre_comm_mask = (sub_df[col_status] == "Pre-committee") | (sub_df[col_reason] == "Pre-committee")
-    deep_dive_mask = pre_comm_mask | ((sub_df[col_status] == "Deep dive") & (sub_df[col_reason] == "Signals (In play)"))
+    pre_comm_mask = (sub_df[col_status] == "Pre-committee") | (sub_df[col_reason] == "Pre-comitee")
+    deep_dive_mask = pre_comm_mask | ((sub_df[col_status] == "Deep dive") | (sub_df[col_reason] == "Signals (In play)"))
     first_int_mask = deep_dive_mask | (sub_df[col_status].isin(["Stand by", "First interaction"]))
+    init_scr_mask = first_int_mask | (sub_df[col_status] == "Initial screening") | (sub_df[col_reason] == "Signals (Qualified)")
     
-    return [outreach, responded, init_scr, len(sub_df[first_int_mask]), len(sub_df[deep_dive_mask]), len(sub_df[pre_comm_mask])]
+    return [outreach, responded, len(sub_df[init_scr_mask]), len(sub_df[first_int_mask]), len(sub_df[deep_dive_mask]), len(sub_df[pre_comm_mask])]
 
 def style_dataframe(df):
     """Aplica estilo dinámico detectando el ancho real del DataFrame."""
@@ -221,6 +229,34 @@ try:
 
         st.markdown("### 📢 Marketing Sources")
         st.dataframe(style_dataframe(generar_tabla(grupos_referencias["MARKETING"])), use_container_width=True)
+
+        st.markdown("---") # Separador visual
+        st.markdown(f"### 🏆 TOTAL CONSOLIDADO: {selected_batch}")
+
+        def generar_tabla_total(df_grupo):
+            """Genera una única fila con el total absoluto del Batch seleccionado."""
+            columnas = ["Métrica", "Outreach", "Responded", "Init. Scr.", "First Int.", "Deep Dive", "Pre-comm"]
+            
+            # Calculamos métricas sobre TODO el df del grupo (batch)
+            c = calcular_metricas_funnel(df_grupo)
+            
+            def fmt(v, p): return f"{v} ({(v/p*100):.0f}%)" if p > 0 else f"{v} (0%)"
+
+            fila_total = [
+                "TOTAL ABSOLUTO", 
+                str(c[0]), 
+                fmt(c[1], c[0]), 
+                fmt(c[2], c[1]), 
+                fmt(c[3], c[2]), 
+                fmt(c[4], c[3]), 
+                fmt(c[5], c[4])
+            ]
+            
+            return pd.DataFrame([fila_total], columns=columnas)
+
+        # Mostramos la tabla de total general para la semana/batch
+        df_total_general = generar_tabla_total(grupo)
+        st.dataframe(style_dataframe(df_total_general), use_container_width=True)
 
 except Exception as e:
     st.error(f"Error: {e}")
