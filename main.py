@@ -158,7 +158,7 @@ def calcular_metricas_funnel(sub_df):
     responded = len(responded_df)
     
     pre_comm_mask = (sub_df[col_status] == "Pre-committee") | (sub_df[col_reason] == "Pre-comitee")
-    deep_dive_mask = pre_comm_mask | ((sub_df[col_status] == "Deep dive") | (sub_df[col_reason] == "Signals (In play)"))
+    deep_dive_mask = pre_comm_mask | ((sub_df[col_status] == "Deep dive") | (sub_df[col_reason] == "Signals (In play)") | (sub_df[col_status] == "Invested"))
     first_int_mask = deep_dive_mask | (sub_df[col_status].isin(["Stand by", "First interaction"]))
     init_scr_mask = first_int_mask | (sub_df[col_status] == "Initial screening") | (sub_df[col_reason] == "Signals (Qualified)")
     
@@ -185,8 +185,6 @@ if st.sidebar.button("🔄 Refrescar datos de Attio"):
     st.cache_data.clear()
     st.rerun()
 
-# ... (Mantén todas las funciones de extracción y caché anteriores igual)
-
 try:
     with st.spinner("Cargando..."):
         df = load_and_clean_data()
@@ -203,60 +201,297 @@ try:
 
         selected_batch = st.sidebar.selectbox("Selecciona un Batch", df['Batch'].unique())
         grupo = df[df['Batch'] == selected_batch]
-        st.subheader(f"📍 {selected_batch}")
 
-        def generar_tabla(fuentes):
-            filas = []
-            columnas = ["Source", "Outreach", "Responded", "Init. Scr.", "First Int.", "Deep Dive", "Pre-comm"]
+        # --- CREACIÓN DE PESTAÑAS ---
+        tab_control, tab_detalle = st.tabs(["🎯 Dashboard Control", "📊 Reporte Detallado"])
+
+        # --- PESTAÑA 1: DASHBOARD CONTROL ---
+        # --- PESTAÑA 1: DASHBOARD CONTROL ---
+        with tab_control:
+            st.subheader(f"Control de Conversión - {selected_batch}")
+
+            # 1. Preparar datos por grupos
+            def get_metrics_dict(df_filtro):
+                c = calcular_metricas_funnel(df_filtro)
+                # c = [outreach, responded, init_scr, first_int, deep_dive, pre_comm]
+                return {
+                    "Outreach": c[0],
+                    "Responded": c[1],
+                    "Deep Dive": c[4],
+                    "Pre-committee": c[5]
+                }
+
+            # Filtrar dataframes por canal
+            df_inv = grupo[grupo[col_ref].isin(grupos_referencias["INVESTMENT"])]
+            df_mkt = grupo[grupo[col_ref].isin(grupos_referencias["MARKETING"])]
+            # 'Other' son los que no están en ninguna de las listas anteriores
+            df_oth = grupo[~grupo[col_ref].isin(grupos_referencias["INVESTMENT"] + grupos_referencias["MARKETING"])]
+
+            m_inv = get_metrics_dict(df_inv)
+            m_mkt = get_metrics_dict(df_mkt)
+            m_oth = get_metrics_dict(df_oth)
+            m_tot = get_metrics_dict(grupo)
+
+            # 2. Construir la matriz de datos (similar a la foto)
+            # Función para formatear valor + % (CVR respecto a la fila anterior del funnel seleccionado)
+            def fmt_val(val, prev):
+                if prev > 0:
+                    return f"{val} ({int(val/prev*100)}%)"
+                return f"{val} (0%)"
+
+            data_matriz = {
+                "Etapa": ["Outreach", "Responded", "Deep Dive", "Pre-committee"],
+                "Inversión": [
+                    str(m_inv["Outreach"]),
+                    fmt_val(m_inv["Responded"], m_inv["Outreach"]),
+                    fmt_val(m_inv["Deep Dive"], m_inv["Responded"]),
+                    fmt_val(m_inv["Pre-committee"], m_inv["Deep Dive"])
+                ],
+                "Marketing": [
+                    str(m_mkt["Outreach"]),
+                    fmt_val(m_mkt["Responded"], m_mkt["Outreach"]),
+                    fmt_val(m_mkt["Deep Dive"], m_mkt["Responded"]),
+                    fmt_val(m_mkt["Pre-committee"], m_mkt["Deep Dive"])
+                ],
+                "Other": [
+                    str(m_oth["Outreach"]),
+                    fmt_val(m_oth["Responded"], m_oth["Outreach"]),
+                    fmt_val(m_oth["Deep Dive"], m_oth["Responded"]),
+                    fmt_val(m_oth["Pre-committee"], m_oth["Deep Dive"])
+                ],
+                "TOTAL": [
+                    str(m_tot["Outreach"]),
+                    fmt_val(m_tot["Responded"], m_tot["Outreach"]),
+                    fmt_val(m_tot["Deep Dive"], m_tot["Responded"]),
+                    fmt_val(m_tot["Pre-committee"], m_tot["Deep Dive"])
+                ]
+            }
+
+            df_matriz = pd.DataFrame(data_matriz)
+
+            # 3. Mostrar la tabla con estilo
+            st.markdown("### 📊 Matriz de Rendimiento por Canal")
+            st.table(df_matriz)
+
+            # --- GRÁFICO PIE CHART: ORIGEN DE DEEP DIVES ---
+            st.divider()
+            st.markdown("### 🎯 Origen de compañías en Deep Dives")
+
+            # 1. Limpieza de nulos en reference_3 antes de filtrar
+            grupo['reference_3'] = grupo['reference_3'].fillna("Other")
+
+            # 2. Filtro CORREGIDO (Agrupando el OR con paréntesis)
+            # Queremos: Que esté en el Batch seleccionado Y (que sea status Deep Dive O reason Signals)
+            mask_deep_dive = (
+                (grupo['status'] == "Deep dive") | 
+                (grupo['reason'] == "Signals (In play)") |
+                (grupo['status'] == "Pre-committee") |
+                (grupo['reason'] == "Pre-comitee") |
+                (grupo['status'] == "Invested")
+            )
             
-            def fmt(v, p): return f"{v} ({(v/p*100):.0f}%)" if p > 0 else f"{v} (0%)"
+            df_deep_dives = grupo[mask_deep_dive].copy()
 
-            for ref in fuentes:
-                subset = grupo[grupo[col_ref] == ref]
-                c = calcular_metricas_funnel(subset)
-                filas.append([ref, str(c[0]), fmt(c[1],c[0]), fmt(c[2],c[1]), fmt(c[3],c[2]), fmt(c[4],c[3]), fmt(c[5],c[4])])
+            # Doble check: Si reference_3 es un string vacío, poner Other
+            df_deep_dives['reference_3'] = df_deep_dives['reference_3'].replace("", "Other")
+
+            if df_deep_dives.empty:
+                st.info("No hay datos de Deep Dive que coincidan con los filtros.")
+            else:
+                # 3. Agrupar y contar
+                df_pie = df_deep_dives['reference_3'].value_counts().reset_index()
+                df_pie.columns = ['Fuente', 'Cantidad']
+
+                # 4. Gráfico interactivo
+                import plotly.express as px
+                
+                fig = px.pie(
+                    df_pie, 
+                    values='Cantidad', 
+                    names='Fuente', 
+                    hole=0.5,
+                    color_discrete_sequence=px.colors.qualitative.Safe # Colores más profesionales
+                )
+
+                fig.update_traces(
+                    textinfo='percent+value',  # Muestra el % y el número absoluto
+                    textposition='inside'      # Fuerza el texto dentro de las porciones
+                )
+                
+                fig.update_layout(
+                    showlegend=True,
+                    legend=dict(
+                        orientation="v",      # Vertical
+                        yanchor="top",
+                        y=1,
+                        xanchor="left",
+                        x=1.05                # Lo mueve a la derecha del gráfico
+                    ),
+                    margin=dict(l=0, r=100, t=30, b=0) # Añadimos margen derecho para la leyenda
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+                
+            # --- GRÁFICO PIE CHART: MOTIVOS DE DESCARTE (REASON) ---
+            st.divider()
+            st.markdown("### ❌ Motivos de Descarte")
+
+            # 1. Filtramos para obtener solo los registros que tienen una razón especificada
+            # Excluimos vacíos para que el gráfico sea relevante
+            df_reasons = grupo[grupo['reason'].str.strip() != ""].copy()
+
+            if df_reasons.empty:
+                st.info("No hay datos de 'reason' para mostrar en este Batch.")
+            else:
+                # 2. Agrupar y contar
+                df_pie_reason = df_reasons['reason'].value_counts().reset_index()
+                df_pie_reason.columns = ['Motivo', 'Cantidad']
+
+                # 3. Gráfico con escala de rojos
+                # Usamos px.colors.sequential.Reds para los tonos rojos
+                fig_reason = px.pie(
+                    df_pie_reason, 
+                    values='Cantidad', 
+                    names='Motivo', 
+                    hole=0.5,
+                    color_discrete_sequence=px.colors.sequential.Reds_r # _r para que los más comunes sean más oscuros
+                )
+
+                fig_reason.update_traces(
+                    textinfo='percent+value',  # Muestra el % y el número absoluto
+                    textposition='inside'      # Fuerza el texto dentro de las porciones
+                )
+                
+                fig_reason.update_layout(
+                    showlegend=True,
+                    legend=dict(
+                        orientation="v",      # Vertical
+                        yanchor="top",
+                        y=1,
+                        xanchor="left",
+                        x=1.05                # Lo mueve a la derecha del gráfico
+                    ),
+                    margin=dict(l=0, r=100, t=30, b=0) # Añadimos margen derecho para la leyenda
+                )
+
+                st.plotly_chart(fig_reason, use_container_width=True)
+
+                # --- NUEVA GRÁFICA: ANÁLISIS DE RED FLAGS ---
+                st.divider()
+                st.markdown("### 🚩 Análisis de Red Flags")
+
+                # 1. Filtrar registros que tengan red flags (no nulos ni vacíos)
+                df_flags = grupo[grupo['red_flags_form_7'].fillna("").str.strip() != ""].copy()
+
+                if df_flags.empty:
+                    st.info("No se han registrado Red Flags en este Batch.")
+                else:
+                    # 2. Lógica para procesar el texto: 
+                    # Separar por salto de línea -> Expandir a filas individuales -> Limpiar espacios
+                    all_flags = (
+                        df_flags['red_flags_form_7']
+                        .str.split('\n')
+                        .explode()
+                        .str.strip()
+                    )
+                    
+                    # Filtrar posibles strings vacíos tras el split
+                    all_flags = all_flags[all_flags != ""]
+
+                    if not all_flags.empty:
+                        # 3. Contar ocurrencias y calcular % manualmente
+                        df_counts = all_flags.value_counts().reset_index()
+                        df_counts.columns = ['Red Flag', 'Frecuencia']
+                        
+                        total_flags = df_counts['Frecuencia'].sum()
+                        # Creamos una columna de texto ya formateada para evitar errores de Plotly
+                        df_counts['Etiqueta'] = df_counts.apply(
+                            lambda x: f"{int(x['Frecuencia'])}<br>{(x['Frecuencia']/total_flags*100):.1f}%", 
+                            axis=1
+                        )
+                        
+                        df_counts = df_counts.sort_values(by='Frecuencia', ascending=False)
+
+                        # 4. Crear gráfico
+                        fig_flags = px.bar(
+                            df_counts,
+                            x='Red Flag',
+                            y='Frecuencia',
+                            text='Etiqueta', # Usamos nuestra columna pre-calculada
+                            color='Frecuencia',
+                            color_continuous_scale='Reds'
+                        )
+
+                        # 5. Configurar visualización de las etiquetas
+                        fig_flags.update_traces(
+                            textposition='outside',
+                            textfont=dict(size=11),
+                            cliponaxis=False
+                        )
+
+                        # 6. Layout
+                        fig_flags.update_layout(
+                            showlegend=False,
+                            coloraxis_showscale=False,
+                            height=600, 
+                            xaxis_title=None,
+                            yaxis_title="Frecuencia",
+                            xaxis=dict(tickangle=45, automargin=True),
+                            margin=dict(l=50, r=50, t=50, b=150) # Aumentado margen inferior por si los textos son muy largos
+                        )
+
+                        st.plotly_chart(fig_flags, use_container_width=True)
+                    else:
+                        st.info("El campo Red Flags está vacío para este grupo.")
+                
+        # --- PESTAÑA 2: REPORTE DETALLADO (Tu lógica original) ---
+        with tab_detalle:
+            st.subheader(f"📍 Detalle de {selected_batch}")
+
+            # 1. TOTAL CONSOLIDADO
+            def generar_tabla_total(df_grupo):
+                columnas = ["Métrica", "Outreach", "Responded", "Init. Scr.", "First Int.", "Deep Dive", "Pre-comm"]
+                c_funnel = calcular_metricas_funnel(df_grupo)
+                def fmt(v, p): return f"{v} ({(v/p*100):.0f}%)" if p > 0 else f"{v} (0%)"
+                
+                fila_total = [
+                    "TOTAL ABSOLUTO", 
+                    str(c_funnel[0]), 
+                    fmt(c_funnel[1], c_funnel[0]), 
+                    fmt(c_funnel[2], c_funnel[1]), 
+                    fmt(c_funnel[3], c_funnel[2]), 
+                    fmt(c_funnel[4], c_funnel[3]), 
+                    fmt(c_funnel[5], c_funnel[4])
+                ]
+                return pd.DataFrame([fila_total], columns=columnas)
+
+            st.markdown(f"### 🏆 TOTAL CONSOLIDADO")
+            df_total_general = generar_tabla_total(grupo)
+            st.dataframe(style_dataframe(df_total_general), use_container_width=True)
             
-            # Total del bloque
-            subset_bloque = grupo[grupo[col_ref].isin(fuentes)]
-            c_s = calcular_metricas_funnel(subset_bloque)
-            filas.append(["TOTAL GRUPO", str(c_s[0]), fmt(c_s[1],c_s[0]), fmt(c_s[2],c_s[1]), fmt(c_s[3],c_s[2]), fmt(c_s[4],c_s[3]), fmt(c_s[5],c_s[4])])
-            
-            return pd.DataFrame(filas, columns=columnas)
+            st.markdown("---") 
 
-        # Visualización
-        st.markdown("### 💰 Investment Sources")
-        st.dataframe(style_dataframe(generar_tabla(grupos_referencias["INVESTMENT"])), use_container_width=True)
+            # 2. TABLAS DETALLADAS POR FUENTE
+            def generar_tabla(fuentes):
+                filas = []
+                columnas = ["Source", "Outreach", "Responded", "Init. Scr.", "First Int.", "Deep Dive", "Pre-comm"]
+                def fmt(v, p): return f"{v} ({(v/p*100):.0f}%)" if p > 0 else f"{v} (0%)"
 
-        st.markdown("### 📢 Marketing Sources")
-        st.dataframe(style_dataframe(generar_tabla(grupos_referencias["MARKETING"])), use_container_width=True)
+                for ref in fuentes:
+                    subset = grupo[grupo[col_ref] == ref]
+                    c_f = calcular_metricas_funnel(subset)
+                    filas.append([ref, str(c_f[0]), fmt(c_f[1],c_f[0]), fmt(c_f[2],c_f[1]), fmt(c_f[3],c_f[2]), fmt(c_f[4],c_f[3]), fmt(c_f[5],c_f[4])])
+                
+                subset_bloque = grupo[grupo[col_ref].isin(fuentes)]
+                c_s = calcular_metricas_funnel(subset_bloque)
+                filas.append(["TOTAL GRUPO", str(c_s[0]), fmt(c_s[1],c_s[0]), fmt(c_s[2],c_s[1]), fmt(c_s[3],c_s[2]), fmt(c_s[4],c_s[3]), fmt(c_s[5],c_s[4])])
+                return pd.DataFrame(filas, columns=columnas)
 
-        st.markdown("---") # Separador visual
-        st.markdown(f"### 🏆 TOTAL CONSOLIDADO: {selected_batch}")
+            st.markdown("### 💰 Investment Sources")
+            st.dataframe(style_dataframe(generar_tabla(grupos_referencias["INVESTMENT"])), use_container_width=True)
 
-        def generar_tabla_total(df_grupo):
-            """Genera una única fila con el total absoluto del Batch seleccionado."""
-            columnas = ["Métrica", "Outreach", "Responded", "Init. Scr.", "First Int.", "Deep Dive", "Pre-comm"]
-            
-            # Calculamos métricas sobre TODO el df del grupo (batch)
-            c = calcular_metricas_funnel(df_grupo)
-            
-            def fmt(v, p): return f"{v} ({(v/p*100):.0f}%)" if p > 0 else f"{v} (0%)"
-
-            fila_total = [
-                "TOTAL ABSOLUTO", 
-                str(c[0]), 
-                fmt(c[1], c[0]), 
-                fmt(c[2], c[1]), 
-                fmt(c[3], c[2]), 
-                fmt(c[4], c[3]), 
-                fmt(c[5], c[4])
-            ]
-            
-            return pd.DataFrame([fila_total], columns=columnas)
-
-        # Mostramos la tabla de total general para la semana/batch
-        df_total_general = generar_tabla_total(grupo)
-        st.dataframe(style_dataframe(df_total_general), use_container_width=True)
+            st.markdown("### 📢 Marketing Sources")
+            st.dataframe(style_dataframe(generar_tabla(grupos_referencias["MARKETING"])), use_container_width=True)
 
 except Exception as e:
     st.error(f"Error: {e}")
