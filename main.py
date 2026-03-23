@@ -28,8 +28,9 @@ MAPA_OWNERS = {
         '7f0c4189-764d-453a-8d6b-e416adf7583b': 'Raquel Polgrabia',
         '7f35b25b-4398-4f28-bcf3-1bf59c2b04d4': 'Alejandro Perez',
         '8bd199e1-4aac-485c-b70f-a9b7679286d1': 'Diego Navarro',
-        '648bf97f-8d29-4965-ab20-6b4cc63f37ee': 'Carlota L',
+        '648bf97f-8d29-4965-ab20-6b4cc63f37ee': 'Carlota mass mailing',
         'c8d13743-d7e8-4e9e-b967-3d8e6ac3750e': 'Lorenzo Hurtado de Saracho',
+        'a50a814f-3434-43ae-80ba-d3377360bde0': "Carlota Lechere"
     }
 # ==============================================================================
 # FUNCIONES DE EXTRACCIÓN Y TRANSFORMACIÓN (LÓGICA CORE)
@@ -212,6 +213,34 @@ def get_avg_time_per_status_cached(entry_data_list):
     # Agrupamos por Status Y por Owner
     return df_durations.groupby(["Status", "Owner"])["Days"].mean().reset_index()
 
+@st.cache_data(ttl=600)
+def get_stuck_companies_data(entry_data_list):
+    async def fetch_current_status_durations():
+        stuck_records = []
+        CHUNK_SIZE = 50 
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for i in range(0, len(entry_data_list), CHUNK_SIZE):
+                batch = entry_data_list[i:i + CHUNK_SIZE]
+                tasks = [fetch_status_history(client, item[0]) for item in batch]
+                histories = await asyncio.gather(*tasks)
+                for idx, history in enumerate(histories):
+                    if not history: continue
+                    current_status = next((h for h in history if h.get("active_until") is None), history[0])
+                    owner_id = batch[idx][1]
+                    owner_name = MAPA_OWNERS.get(owner_id)
+                    start = pd.to_datetime(current_status["active_from"])
+                    days_in_status = (pd.to_datetime("now", utc=True) - start).total_seconds() / 86400
+                    
+                    if days_in_status > 14:
+                        stuck_records.append({
+                            "Owner": owner_name,
+                            "Status": current_status.get("status", {}).get("title"),
+                            "Days": days_in_status
+                        })
+        return stuck_records
+    data = asyncio.run(fetch_current_status_durations())
+    return pd.DataFrame(data)
+
 # --- HELPERS DE INTERFAZ ---
 
 def calcular_metricas_funnel(sub_df):
@@ -391,6 +420,11 @@ try:
                             text=df_tiempos_owner['Days'].apply(lambda x: f"{x:.1f}"),
                             color_discrete_sequence=px.colors.qualitative.Bold
                         )
+
+                        fig_owner_time.update_traces(
+                            textposition='outside', # Forzamos el número fuera de la barra
+                            cliponaxis=False        # Evitamos que el número se esconda si toca el borde
+                        )
                         
                         fig_owner_time.update_layout(
                             xaxis_title=None,
@@ -401,9 +435,66 @@ try:
                         
                         st.plotly_chart(fig_owner_time, use_container_width=True)
 
+            st.markdown("### ⚠️ Compañías Estancadas (> 14 días en estado actual)")
+
+            colores_bold = px.colors.qualitative.Bold
+            # Creamos un diccionario que asigna a cada nombre un color fijo de la paleta
+            lista_owners = list(MAPA_OWNERS.values())
+            color_map_owners = {owner: colores_bold[i % len(colores_bold)] for i, owner in enumerate(lista_owners)}
+
+            # --- DENTRO DE LA PESTAÑA DE DASHBOARD ---
+
+            with st.spinner("Identificando cuellos de botella..."):
+                df_stuck = get_stuck_companies_data(datos_input)
+
+                if df_stuck.empty:
+                    st.success("✅ No hay ninguna compañía estancada por más de 14 días.")
+                else:
+                    # 1. Agrupar y contar
+                    df_stuck_counts = df_stuck.groupby(['Owner', 'Status']).size().reset_index(name='Count')
+                    
+                    # 2. Ordenar funnel
+                    orden_funnel = ["Contacted", "Initial screening", "First interaction", "Deep dive", "Pre-committee"]
+                    df_stuck_counts['Status'] = pd.Categorical(df_stuck_counts['Status'], categories=orden_funnel, ordered=True)
+                    df_stuck_counts = df_stuck_counts.sort_values(['Status', 'Owner'])
+
+                    # --- 3. CÁLCULO DINÁMICO DEL EJE Y ---
+                    # Buscamos el valor más alto y le sumamos un margen para las etiquetas de texto
+                    valor_maximo = df_stuck_counts['Count'].max()
+                    limite_superior = valor_maximo * 1.15  # 15% de margen superior
+
+                    fig_stuck = px.bar(
+                        df_stuck_counts,
+                        x='Status',
+                        y='Count',
+                        color='Owner',
+                        barmode='group',
+                        text='Count',
+                        color_discrete_map=color_map_owners, # Usando el mapa coherente que definimos
+                    )
+                    
+                    fig_stuck.update_traces(
+                        textposition='outside', # Forzamos el número fuera de la barra
+                        cliponaxis=False        # Evitamos que el número se esconda si toca el borde
+                    )
+
+                    fig_stuck.update_layout(
+                        xaxis_title=None,
+                        yaxis_title="Cantidad de Compañías",
+                        height=450,
+                        # --- AQUÍ FORZAMOS EL AJUSTE ---
+                        yaxis=dict(
+                            range=[0, limite_superior], # El eje Y irá de 0 a (42 * 1.15 = 48.3)
+                            dtick=5 if valor_maximo < 50 else 10 # Marcas cada 5 unidades para mayor precisión
+                        ),
+                        margin=dict(t=50, b=50)
+                    )
+                    
+                    st.plotly_chart(fig_stuck, use_container_width=True)
+
             # --- GRÁFICO PIE CHART: ORIGEN DE DEEP DIVES ---
             st.divider()
-            st.markdown("### 🎯 Origen de compañías en Deep Dives")
+            st.markdown("### 🎯 Origen de compañías en Deep Dive")
 
             # 1. Limpieza de nulos en reference_3 antes de filtrar
             grupo['reference_3'] = grupo['reference_3'].fillna("Other")
