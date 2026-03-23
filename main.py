@@ -268,6 +268,24 @@ try:
         selected_batch = st.sidebar.selectbox("Selecciona un Batch", df['Batch'].unique())
         grupo = df[df['Batch'] == selected_batch]
 
+        st.subheader(f"Estado actual: {selected_batch}")
+
+        counts = grupo["status"].value_counts()
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("Contacted", counts.get("Contacted", 0))
+        with col2:
+            st.metric("Initial Screening", counts.get("Initial screening", 0))
+        with col3:
+            st.metric("First Interaction", counts.get("First interaction", 0))
+        with col4:
+            st.metric("Deep Dive", counts.get("Deep dive", 0))
+        with col5:
+            st.metric("Pre-committee", counts.get("Pre-committee", 0))
+
+        st.divider()
+
         # --- CREACIÓN DE PESTAÑAS ---
         tab_control, tab_detalle = st.tabs(["🎯 Dashboard Control", "📊 Reporte Detallado"])
 
