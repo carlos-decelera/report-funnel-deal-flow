@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import httpx
 import asyncio
+import plotly.express as px
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Decelera Funnel Report", layout="wide")
@@ -23,6 +24,13 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
+MAPA_OWNERS = {
+        '7f0c4189-764d-453a-8d6b-e416adf7583b': 'Raquel Polgrabia',
+        '7f35b25b-4398-4f28-bcf3-1bf59c2b04d4': 'Alejandro Perez',
+        '8bd199e1-4aac-485c-b70f-a9b7679286d1': 'Diego Navarro',
+        '648bf97f-8d29-4965-ab20-6b4cc63f37ee': 'Carlota L',
+        'c8d13743-d7e8-4e9e-b967-3d8e6ac3750e': 'Lorenzo Hurtado de Saracho',
+    }
 # ==============================================================================
 # FUNCIONES DE EXTRACCIÓN Y TRANSFORMACIÓN (LÓGICA CORE)
 # ==============================================================================
@@ -42,6 +50,8 @@ def extract_value(attr_list):
         elif attr_type == "email-address": val = item.get("email_address")
         elif attr_type in ("text", "number", "date", "timestamp", "checkbox"):
             val = item.get("value")
+        elif attr_type == "actor-reference":
+            val = item.get("referenced_actor_id")
         else: val = item.get("value")
         if val is not None: extracted.append(str(val))
     return extracted[0] if len(extracted) == 1 else extracted or None
@@ -124,6 +134,11 @@ def load_and_clean_data():
     df_clean[col_fecha] = pd.to_datetime(df_clean[col_fecha]).dt.date
     df_clean['reference_3'] = df_clean['reference_3'].fillna("Other")
     df_clean['reason'] = df_clean['reason'].fillna("")
+
+    if 'owner' in df_clean.columns:
+        df_clean['owner_name'] = df_clean['owner'].map(MAPA_OWNERS).dropna()
+    else:
+        df_clean['owner_name'] = "No definido"
     
     # 2. Clasificación original
     df_clean[['Batch', 'Prioridad']] = df_clean.apply(
@@ -145,6 +160,57 @@ def load_and_clean_data():
     df_final = df_final.sort_values(by=['Prioridad', col_fecha])
     
     return df_final
+
+# ---- HELPERS DE TIEMPO EN STATUS -----
+
+async def fetch_status_history(client, entry_id):
+    """Consulta el historial de cambios del atributo 'status' para un registro."""
+    url = f"{BASE_URL}/lists/{DEAL_FLOW_ID}/entries/{entry_id}/attributes/status/values"
+    params = {"show_historic": "true"}
+    response = await client.get(url, headers=HEADERS, params=params)
+    if response.status_code != 200: return []
+    return response.json().get("data", [])
+
+@st.cache_data(ttl=600)
+def get_avg_time_per_status_cached(entry_data_list):
+    """
+    entry_data_list: debe ser una lista de tuplas [(entry_id, owner_id), ...]
+    """
+    async def fetch_all_histories():
+        all_durations = []
+        CHUNK_SIZE = 50 
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for i in range(0, len(entry_data_list), CHUNK_SIZE):
+                batch = entry_data_list[i:i + CHUNK_SIZE]
+                # batch[0] es entry_id, batch[1] es owner_id
+                tasks = [fetch_status_history(client, item[0]) for item in batch]
+                histories = await asyncio.gather(*tasks)
+
+                for idx, history in enumerate(histories):
+                    owner_id = batch[idx][1] # Recuperamos el owner de esta empresa
+                    owner_name = MAPA_OWNERS.get(owner_id)
+                    
+                    for value in history:
+                        status_title = value.get("status", {}).get("title")
+                        start = pd.to_datetime(value["active_from"])
+                        end = pd.to_datetime(value["active_until"]) if value.get("active_until") else pd.to_datetime("now", utc=True)
+                        
+                        duration = (end - start).total_seconds() / 86400
+                        if status_title:
+                            all_durations.append({
+                                "Status": status_title, 
+                                "Days": duration,
+                                "Owner": owner_name
+                            })
+        return all_durations
+
+    data = asyncio.run(fetch_all_histories())
+    if not data: return pd.DataFrame()
+    
+    df_durations = pd.DataFrame(data)
+    # Agrupamos por Status Y por Owner
+    return df_durations.groupby(["Status", "Owner"])["Days"].mean().reset_index()
 
 # --- HELPERS DE INTERFAZ ---
 
@@ -206,7 +272,7 @@ try:
         tab_control, tab_detalle = st.tabs(["🎯 Dashboard Control", "📊 Reporte Detallado"])
 
         # --- PESTAÑA 1: DASHBOARD CONTROL ---
-        # --- PESTAÑA 1: DASHBOARD CONTROL ---
+
         with tab_control:
             st.subheader(f"Control de Conversión - {selected_batch}")
 
@@ -272,6 +338,50 @@ try:
             # 3. Mostrar la tabla con estilo
             st.markdown("### 📊 Matriz de Rendimiento por Canal")
             st.table(df_matriz)
+
+            # --- SECCIÓN: TIEMPO MEDIO POR OWNER ---
+            st.divider()
+            st.markdown("### ⏱️ Tiempo Medio por Estado y Owner")
+            
+            with st.spinner("Analizando historial por equipo..."):
+                # Preparamos los datos: lista de (id_entrada, id_owner)
+                # IMPORTANTE: Cambia 'owner' por el nombre real de tu columna de owner
+                col_tecnica_owner = 'owner' 
+                
+                datos_input = grupo[['entry_id', col_tecnica_owner]].dropna().values.tolist()
+                
+                if not datos_input:
+                    st.info("No hay datos suficientes para segmentar por Owner.")
+                else:
+                    df_tiempos_owner = get_avg_time_per_status_cached(datos_input)
+
+                    if df_tiempos_owner.empty:
+                        st.info("No se encontró historial para este grupo.")
+                    else:
+                        # Ordenar funnel
+                        orden_funnel = ["Contacted", "Initial screening", "First interaction", "Deep dive", "Pre-committee"]
+                        df_tiempos_owner['Status'] = pd.Categorical(df_tiempos_owner['Status'], categories=orden_funnel, ordered=True)
+                        df_tiempos_owner = df_tiempos_owner.sort_values(['Status', 'Owner']).dropna()
+
+                        # Gráfica de barras agrupadas (barmode='group')
+                        fig_owner_time = px.bar(
+                            df_tiempos_owner,
+                            x='Status',
+                            y='Days',
+                            color='Owner', # Diferenciamos por color de Owner
+                            barmode='group', # Las pone una al lado de la otra
+                            text=df_tiempos_owner['Days'].apply(lambda x: f"{x:.1f}"),
+                            color_discrete_sequence=px.colors.qualitative.Bold
+                        )
+                        
+                        fig_owner_time.update_layout(
+                            xaxis_title=None,
+                            yaxis_title="Días Promedio",
+                            legend_title="Responsable",
+                            height=500
+                        )
+                        
+                        st.plotly_chart(fig_owner_time, use_container_width=True)
 
             # --- GRÁFICO PIE CHART: ORIGEN DE DEEP DIVES ---
             st.divider()
